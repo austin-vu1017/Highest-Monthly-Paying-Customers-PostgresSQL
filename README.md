@@ -1,12 +1,11 @@
 # Highest-Monthly-Paying-Customers-PostgresSQL
 
-# Overview
 This project utilises the DVD dataset from PostgreSQL. This is to conduct an analysis on customer behaviors and identify this highly-valued customers. 
 With this analysis report, businesses can strategize on incentive programs i.e. loyalty, membership level, priority along with sales or marketing flights.
 
 <img width="704" alt="image" src="https://github.com/austin-vu1017/Highest-Monthly-Paying-Customers-PostgresSQL/assets/21083126/c4a7630a-9dcb-4fde-895a-0235b645b9a4">
 
-# Report Structure
+# Report Overview
 The report is created from various tables existing at different levels. Starting from 1, each layer becomes more transformed and condensed while also preserving the other tables for other usages:
 
 1. Detailed table
