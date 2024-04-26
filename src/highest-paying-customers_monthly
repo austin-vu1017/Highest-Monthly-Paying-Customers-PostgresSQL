@@ -1,0 +1,318 @@
+-- Create detailed report
+create table if not exists detailed_table (
+	first_name varchar(50),
+	last_name varchar(50),
+	customer_id smallint,
+	rental_id smallint,
+	rental_date date,
+	rental_payment numeric(5,2),
+	store_id smallint
+);
+
+-- Extract raw data to insert into detailed report
+insert into detailed_table (first_name, last_name, customer_id, rental_id, rental_date, rental_payment, store_id)
+select
+	ctmr.first_name,
+	ctmr.last_name,
+	ctmr.customer_id,
+	r.rental_id,
+	r.rental_date,
+	p.amount,
+	i.store_id
+from
+	customer ctmr
+	inner join rental r on ctmr.customer_id = r.customer_id
+	inner join payment p on r.rental_id = p.rental_id
+	inner join inventory i on r.inventory_id = i.inventory_id;
+
+-- check detailed_table's result table
+select * from detailed_table;
+
+-- function to extract month
+create or replace function extract_month(rental_date date) returns int as
+	$$
+	declare rental_month int;
+	begin
+		select date_part('month',rental_date) into rental_month;
+		return rental_month;
+	end;
+	$$ language plpgsql;
+
+-- function to extract year
+create or replace function extract_year(rental_date date) returns int as
+	$$
+	declare rental_year int;
+	begin
+		select date_part('year',rental_date) into rental_year;
+		return rental_year;
+	end;
+	$$ language plpgsql;
+
+-- function to concat customer's name
+create or replace function combine_name(first_name text, last_name text) returns text as
+	$$
+	declare full_name text;
+	begin
+		select concat(first_name, ' ', last_name) into full_name;
+		return full_name;
+	end;
+	$$ language plpgsql;
+
+-- SUMMARY TABLE
+-- create summary table
+create table if not exists summary_table (
+	full_name varchar(100),
+	customer_id smallint,
+	rental_payment_rank smallint,
+	monthly_rental_payment numeric(5,2),
+	rental_month smallint,
+	rental_year smallint,
+	store_id smallint
+);
+
+-- insert data to summary table
+-- orders the summary table by store_id, year, month, then ranking
+insert into summary_table (full_name, customer_id, rental_payment_rank, monthly_rental_payment, rental_month, rental_year, store_id)
+with
+	store_one_summary as (
+		select
+			combine_name(first_name, last_name) full_name,
+			customer_id,
+			dense_rank() over (partition by extract_month(rental_date) order by sum(rental_payment) desc) rental_payment_rank,
+			sum(rental_payment) monthly_rental_payment,
+			extract_month(rental_date) rental_month,
+			extract_year(rental_date) rental_year,
+			store_id
+		from detailed_table
+		where store_id = 1
+		group by 1,2,5,6,7
+	),
+	store_two_summary as (
+		select
+			combine_name(first_name, last_name) full_name,
+			customer_id,
+			dense_rank() over (partition by extract_month(rental_date) order by sum(rental_payment) desc) rental_payment_rank,
+			sum(rental_payment) monthly_rental_payment,
+			extract_month(rental_date) rental_month,
+			extract_year(rental_date) rental_year,
+			store_id
+		from detailed_table
+		where store_id = 2
+		group by 1,2,5,6,7
+	)
+select * from store_one_summary s1
+union
+select * from store_two_summary s2
+order by 7,6,5,3;
+
+-- check summary_table's result table
+select * from summary_table;
+
+-- data verification comparing sum of rental cost and count of rentals for both detailed and summary tables
+-- 61312.04 for total_rental_payment in both tables
+select sum(rental_payment) detailed_total_rental_payment from detailed_table
+select sum(monthly_rental_payment) summary_total_rental_payment from summary_table;
+
+-- data verification by returning result table if there's missing name from summary table when left joining with detailed table
+-- returns no result since there's no missing customer from the summary table when left joined with detailed table
+with
+	detailed_customer_list as (
+		select distinct combine_name(dt.first_name, dt.last_name) customer_list
+		from detailed_table dt
+		order by 1
+	),
+	summary_customer_list as (
+		select distinct full_name customer_list
+		from summary_table
+		order by 1
+	)
+select
+	dcl.customer_list,
+	scl.customer_list
+from
+	detailed_customer_list dcl
+	left join summary_customer_list scl on dcl.customer_list = scl.customer_list
+where scl.customer_list is null;
+
+-- SUMMARY REPORT TABLE
+-- final report
+create table if not exists summary_report (
+	highest_paying_customer varchar(100),
+	highest_rental_payments numeric(5,2),
+	rental_month smallint,
+	rental_year smallint,
+	store_id smallint
+);
+-- load data to final report. 
+-- cte to condense the query, window function with dense rank to account for gaps and get the highest paying customer, 
+-- union over union all because there should be no duplicate records
+-- there should be 4 customer per store since we only have 4 months of data
+insert into summary_report (highest_paying_customer, highest_rental_payments, rental_month, rental_year, store_id)
+select
+	full_name,
+	monthly_rental_payment,
+	rental_month,
+	rental_year,
+	store_id
+from
+	summary_table
+where rental_payment_rank = 1;
+
+--TRIGGER CREATION
+-- function to automate the update for any rows to the summary report
+create or replace function summary_report_update_function() returns trigger as
+	$$
+	begin
+		delete from summary_report;
+		insert into summary_report (
+			with
+				store_one_summary as (
+					select
+						combine_name(first_name, last_name) full_name,
+						customer_id,
+						dense_rank() over (partition by extract_month(rental_date) order by sum(rental_payment) desc) rental_payment_rank,
+						sum(rental_payment) monthly_rental_payment,
+						extract_month(rental_date) rental_month,
+						extract_year(rental_date) rental_year,
+						store_id
+					from detailed_table
+					where store_id = 1
+					group by 1,2,5,6,7
+					order by 7,6,5,3
+				),
+				store_two_summary as (
+					select
+						combine_name(first_name, last_name) full_name,
+						customer_id,
+						dense_rank() over (partition by extract_month(rental_date) order by sum(rental_payment) desc) rental_payment_rank,
+						sum(rental_payment) monthly_rental_payment,
+						extract_month(rental_date) rental_month,
+						extract_year(rental_date) rental_year,
+						store_id
+					from detailed_table
+					where store_id = 2
+					group by 1,2,5,6,7
+					order by 7,6,5,3
+				)
+				select
+					full_name highest_paying_customer,
+					monthly_rental_payment,
+					rental_month,
+					rental_year,
+					store_id
+				from
+					store_one_summary
+				where rental_payment_rank = 1
+				union all
+				select
+					full_name highest_paying_customer,
+					monthly_rental_payment,
+					rental_month,
+					rental_year,
+					store_id
+				from
+					store_two_summary
+				where rental_payment_rank = 1
+		);
+		return new;
+	end;
+	$$ language plpgsql;
+create or replace trigger summary_report_update_trigger
+after insert or update or delete on detailed_table
+for each row execute procedure summary_report_update_function();
+
+-- DATA VERIFICATION W/ INSERT, UPDATE, DELETE
+-- currently, there's no customers in Mar '06. the latest rental transaction is 2006-02-14. 
+-- displaying all data from summary_report shows rental up to Feb '06. 
+-- Mildred Bailey and Tammy Sanders has the highest payment in Feb '06 with $9.98 and $8.97 respectively
+select min(rental_date) earliest_rental, max(rental_date) latest_rental from detailed_table
+select * from summary_report
+-- add new rows into the detailed_table with the row's rental_date being in Mar '06 and in store both stores
+insert into detailed_table values ('John', 'Doe', 11111, 22221, '2006-03-01', 61.00, 1),('Jane', 'Doe', 11112, 22222, '2006-03-01', 62.00, 2) returning *
+-- the latest_rental was found in 2006-03-01 in detailed_rental. summary_report shows the new row in Mar '06
+select min(rental_date) earliest_rental, max(rental_date) latest_rental from detailed_table
+select * from summary_report
+-- update all rows where first_name is Mildred or Tammy in rental was in Feb '06 by increasing rental_payment by $10.
+update detailed_table set rental_payment = rental_payment + 10 where first_name in ('Mildred', 'Tammy') and date_part('month', rental_date) = 2 returning *
+-- still see the inserted rows in Mar '06. notice customer in Feb '06 had an increase in $10 for payment
+select min(rental_date) earliest_rental, max(rental_date) latest_rental from detailed_table
+select * from summary_report
+-- remove the added rows
+delete from detailed_table where customer_id in (11111, 11112) returning *
+-- latest rental date is now 2006-02-14 and summary_report doesn't show Mar '06 after deleting the rows
+select min(rental_date) earliest_rental, max(rental_date) latest_rental from detailed_table
+select * from summary_report;
+
+-- STORED PROCEDURE
+create or replace procedure summary_report_refresh_data() as
+	$$
+	begin
+		delete from detailed_table;
+		delete from summary_table;
+		delete from summary_report;
+		insert into detailed_table (
+			select
+				ctmr.first_name,
+				ctmr.last_name,
+				ctmr.customer_id,
+				r.rental_id,
+				r.rental_date,
+				p.amount,
+				i.store_id
+			from
+				customer ctmr
+				inner join rental r on ctmr.customer_id = r.customer_id
+				inner join payment p on r.rental_id = p.rental_id
+				inner join inventory i on r.inventory_id = i.inventory_id
+		);
+		insert into summary_table (
+			with
+				store_one_summary as (
+					select
+						combine_name(first_name, last_name) full_name,
+						customer_id,
+						dense_rank() over (partition by extract_month(rental_date) order by sum(rental_payment) desc) rental_payment_rank,
+						sum(rental_payment) monthly_rental_payment,
+						extract_month(rental_date) rental_month,
+						extract_year(rental_date) rental_year,
+						store_id
+					from detailed_table
+					where store_id = 1
+					group by 1,2,5,6,7
+					order by 7,6,5,3
+				),
+				store_two_summary as (
+					select
+						combine_name(first_name, last_name) full_name,
+						customer_id,
+						dense_rank() over (partition by extract_month(rental_date) order by sum(rental_payment) desc) rental_payment_rank,
+						sum(rental_payment) monthly_rental_payment,
+						extract_month(rental_date) rental_month,
+						extract_year(rental_date) rental_year,
+						store_id
+					from detailed_table
+					where store_id = 2
+					group by 1,2,5,6,7
+					order by 7,6,5,3
+				)
+			select * from store_one_summary
+			union
+			select * from store_two_summary
+		);
+		insert into summary_report (
+			select
+				full_name,
+				rental_payment_rank,
+				rental_month,
+				rental_year,
+				store_id
+			from
+				summary_table
+			where rental_payment_rank = 1
+		);
+	return;
+	end;
+	$$ language plpgsql;
+
+--CALL STORED PROCEDURE
+call summary_report_refresh_data();
